@@ -1,0 +1,391 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:activiti="http://activiti.org/bpmn"
+             xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+             xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+             xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+             xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+             targetNamespace="http://orchestrpay.io/payment-process"
+             exporter="OrchestrPay Designer"
+             exporterVersion="1.0">
+
+  <process id="paymentProcess" name="Payment Process" isExecutable="true">
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         START EVENT
+    ═══════════════════════════════════════════════════════════════════ -->
+    <startEvent id="start" name="Платёж инициирован">
+      <outgoing>flow_start_create</outgoing>
+    </startEvent>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         HAPPY PATH — COMPENSABLE TRANSACTIONS
+    ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Step 1: CREATE_PAYMENT (compensable → CANCEL_PAYMENT) -->
+    <serviceTask id="createPayment"
+                 name="CREATE_PAYMENT&#10;Создать платёж в БД"
+                 zeebe:type="create-payment">
+      <incoming>flow_start_create</incoming>
+      <outgoing>flow_create_debit</outgoing>
+    </serviceTask>
+
+    <!-- Step 2: DEBIT_ACCOUNT (compensable → CREDIT_ACCOUNT) -->
+    <serviceTask id="debitAccount"
+                 name="DEBIT_ACCOUNT&#10;Зарезервировать средства"
+                 zeebe:type="debit-account">
+      <incoming>flow_create_debit</incoming>
+      <outgoing>flow_debit_fraud</outgoing>
+    </serviceTask>
+
+    <!-- Step 3: FRAUD_CHECK (repeatable — no compensation) -->
+    <serviceTask id="fraudCheck"
+                 name="FRAUD_CHECK&#10;Антифрод-проверка"
+                 zeebe:type="fraud-check">
+      <incoming>flow_debit_fraud</incoming>
+      <outgoing>flow_fraud_gw</outgoing>
+    </serviceTask>
+
+    <!-- Exclusive gateway — fraud check result -->
+    <exclusiveGateway id="fraudGateway"
+                      name="Результат антифрода"
+                      default="flow_gw_denied">
+      <incoming>flow_fraud_gw</incoming>
+      <outgoing>flow_gw_approved</outgoing>
+      <outgoing>flow_gw_manual</outgoing>
+      <outgoing>flow_gw_denied</outgoing>
+    </exclusiveGateway>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         MANUAL REVIEW BRANCH
+    ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Step 3a: WAIT_MANUAL_REVIEW (user task with 20-min boundary timer) -->
+    <userTask id="waitManualReview"
+              name="WAIT_MANUAL_REVIEW&#10;Ожидание решения оператора">
+      <incoming>flow_gw_manual</incoming>
+      <outgoing>flow_review_manual_gw</outgoing>
+    </userTask>
+
+    <!-- Boundary timer: CUT-OFF 20 minutes → auto-approve -->
+    <boundaryEvent id="cutoffTimer"
+                   name="CUT-OFF 20 мин"
+                   cancelActivity="true"
+                   attachedToRef="waitManualReview">
+      <timerEventDefinition>
+        <timeDuration xsi:type="tFormalExpression">PT20M</timeDuration>
+      </timerEventDefinition>
+      <outgoing>flow_cutoff_merge</outgoing>
+    </boundaryEvent>
+
+    <!-- Exclusive gateway — operator decision -->
+    <exclusiveGateway id="manualGateway"
+                      name="Решение оператора"
+                      default="flow_manual_denied">
+      <incoming>flow_review_manual_gw</incoming>
+      <outgoing>flow_manual_approved</outgoing>
+      <outgoing>flow_manual_denied</outgoing>
+    </exclusiveGateway>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         MERGE GATEWAY — approved paths converge here before pivot
+    ═══════════════════════════════════════════════════════════════════ -->
+    <exclusiveGateway id="mergeGateway" name="Одобрено">
+      <incoming>flow_gw_approved</incoming>
+      <incoming>flow_cutoff_merge</incoming>
+      <incoming>flow_manual_approved</incoming>
+      <outgoing>flow_merge_transfer</outgoing>
+    </exclusiveGateway>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         PIVOT POINT — TRANSFER_FUNDS (NON-COMPENSABLE)
+         After this step no rollback is possible.
+    ═══════════════════════════════════════════════════════════════════ -->
+    <serviceTask id="transferFunds"
+                 name="TRANSFER_FUNDS&#10;Перевод контрагенту&#10;★ PIVOT POINT"
+                 zeebe:type="transfer-funds">
+      <incoming>flow_merge_transfer</incoming>
+      <outgoing>flow_transfer_update</outgoing>
+    </serviceTask>
+
+    <!-- Step: UPDATE_PAYMENT_STATUS → COMPLETED (repeatable) -->
+    <serviceTask id="updateStatusOk"
+                 name="UPDATE_STATUS&#10;→ COMPLETED"
+                 zeebe:type="update-payment-status">
+      <incoming>flow_transfer_update</incoming>
+      <outgoing>flow_update_notify</outgoing>
+    </serviceTask>
+
+    <!-- Step: NOTIFY_CLIENT_SUCCESS (repeatable) -->
+    <serviceTask id="notifySuccess"
+                 name="NOTIFY_CLIENT_SUCCESS&#10;Уведомление об успехе"
+                 zeebe:type="notify-client">
+      <incoming>flow_update_notify</incoming>
+      <outgoing>flow_notify_end</outgoing>
+    </serviceTask>
+
+    <!-- End: payment completed -->
+    <endEvent id="endSuccess" name="COMPLETED&#10;Платёж проведён">
+      <incoming>flow_notify_end</incoming>
+    </endEvent>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         COMPENSATION PATH
+    ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Compensation Step 1: CREDIT_ACCOUNT (compensation for DEBIT_ACCOUNT) -->
+    <serviceTask id="creditAccount"
+                 name="CREDIT_ACCOUNT&#10;Возврат средств"
+                 zeebe:type="credit-account">
+      <incoming>flow_gw_denied</incoming>
+      <incoming>flow_manual_denied</incoming>
+      <outgoing>flow_credit_cancel</outgoing>
+    </serviceTask>
+
+    <!-- Compensation Step 2: CANCEL_PAYMENT (compensation for CREATE_PAYMENT) -->
+    <serviceTask id="cancelPayment"
+                 name="CANCEL_PAYMENT&#10;Отмена платежа"
+                 zeebe:type="cancel-payment">
+      <incoming>flow_credit_cancel</incoming>
+      <outgoing>flow_cancel_update</outgoing>
+    </serviceTask>
+
+    <!-- Compensation Step 3: UPDATE_PAYMENT_STATUS → REFUNDED (repeatable) -->
+    <serviceTask id="updateStatusFail"
+                 name="UPDATE_STATUS&#10;→ REFUNDED"
+                 zeebe:type="update-payment-status">
+      <incoming>flow_cancel_update</incoming>
+      <outgoing>flow_update_fail_notify</outgoing>
+    </serviceTask>
+
+    <!-- Compensation Step 4: NOTIFY_CLIENT_FAILURE (repeatable) -->
+    <serviceTask id="notifyFailure"
+                 name="NOTIFY_CLIENT_FAILURE&#10;Уведомление об отклонении/возврате"
+                 zeebe:type="notify-client">
+      <incoming>flow_update_fail_notify</incoming>
+      <outgoing>flow_failure_flag_gw</outgoing>
+    </serviceTask>
+
+    <!-- Gateway: was this a fraud case? -->
+    <exclusiveGateway id="fraudFlagGateway"
+                      name="Мошенничество?"
+                      default="flow_flag_no_fraud">
+      <incoming>flow_failure_flag_gw</incoming>
+      <outgoing>flow_flag_fraud</outgoing>
+      <outgoing>flow_flag_no_fraud</outgoing>
+    </exclusiveGateway>
+
+    <!-- NOTIFY_SECURITY (repeatable — only on fraud) -->
+    <serviceTask id="notifySecurity"
+                 name="NOTIFY_SECURITY&#10;Алерт службе безопасности"
+                 zeebe:type="notify-security">
+      <incoming>flow_flag_fraud</incoming>
+      <outgoing>flow_security_end</outgoing>
+    </serviceTask>
+
+    <!-- End: payment refunded -->
+    <endEvent id="endRefunded" name="REFUNDED&#10;Средства возвращены">
+      <incoming>flow_flag_no_fraud</incoming>
+      <incoming>flow_security_end</incoming>
+    </endEvent>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SEQUENCE FLOWS
+    ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Happy path -->
+    <sequenceFlow id="flow_start_create"   sourceRef="start"          targetRef="createPayment"/>
+    <sequenceFlow id="flow_create_debit"   sourceRef="createPayment"  targetRef="debitAccount"/>
+    <sequenceFlow id="flow_debit_fraud"    sourceRef="debitAccount"   targetRef="fraudCheck"/>
+    <sequenceFlow id="flow_fraud_gw"       sourceRef="fraudCheck"     targetRef="fraudGateway"/>
+
+    <!-- Fraud gateway branches -->
+    <sequenceFlow id="flow_gw_approved" name="Разрешено"
+                  sourceRef="fraudGateway" targetRef="mergeGateway">
+      <conditionExpression xsi:type="tFormalExpression">= fraudResult = "APPROVED"</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="flow_gw_manual" name="Ручная проверка"
+                  sourceRef="fraudGateway" targetRef="waitManualReview">
+      <conditionExpression xsi:type="tFormalExpression">= fraudResult = "MANUAL_REVIEW"</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="flow_gw_denied" name="Запрет"
+                  sourceRef="fraudGateway" targetRef="creditAccount"/>
+
+    <!-- Manual review -->
+    <sequenceFlow id="flow_review_manual_gw" sourceRef="waitManualReview" targetRef="manualGateway"/>
+    <sequenceFlow id="flow_cutoff_merge" name="Авто-одобрение (cut-off)"
+                  sourceRef="cutoffTimer" targetRef="mergeGateway"/>
+    <sequenceFlow id="flow_manual_approved" name="Одобрено оператором"
+                  sourceRef="manualGateway" targetRef="mergeGateway">
+      <conditionExpression xsi:type="tFormalExpression">= operatorDecision = "APPROVED"</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="flow_manual_denied" name="Отклонено оператором"
+                  sourceRef="manualGateway" targetRef="creditAccount"/>
+
+    <!-- Pivot and success -->
+    <sequenceFlow id="flow_merge_transfer"  sourceRef="mergeGateway"   targetRef="transferFunds"/>
+    <sequenceFlow id="flow_transfer_update" sourceRef="transferFunds"  targetRef="updateStatusOk"/>
+    <sequenceFlow id="flow_update_notify"   sourceRef="updateStatusOk" targetRef="notifySuccess"/>
+    <sequenceFlow id="flow_notify_end"      sourceRef="notifySuccess"  targetRef="endSuccess"/>
+
+    <!-- Compensation chain -->
+    <sequenceFlow id="flow_credit_cancel"      sourceRef="creditAccount"  targetRef="cancelPayment"/>
+    <sequenceFlow id="flow_cancel_update"      sourceRef="cancelPayment"  targetRef="updateStatusFail"/>
+    <sequenceFlow id="flow_update_fail_notify" sourceRef="updateStatusFail" targetRef="notifyFailure"/>
+    <sequenceFlow id="flow_failure_flag_gw"    sourceRef="notifyFailure"  targetRef="fraudFlagGateway"/>
+    <sequenceFlow id="flow_flag_fraud" name="Да (мошенничество)"
+                  sourceRef="fraudFlagGateway" targetRef="notifySecurity">
+      <conditionExpression xsi:type="tFormalExpression">= isFraud = true</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="flow_flag_no_fraud" name="Нет"
+                  sourceRef="fraudFlagGateway" targetRef="endRefunded"/>
+    <sequenceFlow id="flow_security_end"       sourceRef="notifySecurity" targetRef="endRefunded"/>
+
+  </process>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       BPMN DIAGRAM (visual layout — Camunda Modeler compatible)
+  ═══════════════════════════════════════════════════════════════════════ -->
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="paymentProcess">
+
+      <!-- Row A: happy path (y centre = 290) -->
+      <bpmndi:BPMNShape id="shape_start"          bpmnElement="start"          isHorizontal="true">
+        <dc:Bounds x="52"  y="272" width="36"  height="36"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_createPayment"  bpmnElement="createPayment"  isHorizontal="true">
+        <dc:Bounds x="140" y="250" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_debitAccount"   bpmnElement="debitAccount"   isHorizontal="true">
+        <dc:Bounds x="320" y="250" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_fraudCheck"     bpmnElement="fraudCheck"     isHorizontal="true">
+        <dc:Bounds x="500" y="250" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_fraudGateway"   bpmnElement="fraudGateway"   isMarkerVisible="true">
+        <dc:Bounds x="685" y="265" width="50"  height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_mergeGateway"   bpmnElement="mergeGateway"   isMarkerVisible="true">
+        <dc:Bounds x="875" y="265" width="50"  height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_transferFunds"  bpmnElement="transferFunds"  isHorizontal="true">
+        <dc:Bounds x="975" y="250" width="150" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_updateStatusOk" bpmnElement="updateStatusOk" isHorizontal="true">
+        <dc:Bounds x="1175" y="250" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_notifySuccess"  bpmnElement="notifySuccess"  isHorizontal="true">
+        <dc:Bounds x="1355" y="250" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_endSuccess"     bpmnElement="endSuccess">
+        <dc:Bounds x="1537" y="272" width="36"  height="36"/>
+      </bpmndi:BPMNShape>
+
+      <!-- Row B: manual review (y centre = 440) -->
+      <bpmndi:BPMNShape id="shape_waitManualReview" bpmnElement="waitManualReview" isHorizontal="true">
+        <dc:Bounds x="685" y="410" width="150" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_cutoffTimer"    bpmnElement="cutoffTimer">
+        <dc:Bounds x="799" y="472" width="36"  height="36"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_manualGateway"  bpmnElement="manualGateway"  isMarkerVisible="true">
+        <dc:Bounds x="875" y="425" width="50"  height="50"/>
+      </bpmndi:BPMNShape>
+
+      <!-- Row C: compensation (y centre = 600) -->
+      <bpmndi:BPMNShape id="shape_creditAccount"  bpmnElement="creditAccount"  isHorizontal="true">
+        <dc:Bounds x="685" y="560" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_cancelPayment"  bpmnElement="cancelPayment"  isHorizontal="true">
+        <dc:Bounds x="865" y="560" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_updateStatusFail" bpmnElement="updateStatusFail" isHorizontal="true">
+        <dc:Bounds x="1045" y="560" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_notifyFailure"  bpmnElement="notifyFailure"  isHorizontal="true">
+        <dc:Bounds x="1225" y="560" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_fraudFlagGateway" bpmnElement="fraudFlagGateway" isMarkerVisible="true">
+        <dc:Bounds x="1405" y="575" width="50"  height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_notifySecurity" bpmnElement="notifySecurity" isHorizontal="true">
+        <dc:Bounds x="1505" y="560" width="130" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shape_endRefunded"    bpmnElement="endRefunded">
+        <dc:Bounds x="1687" y="582" width="36"  height="36"/>
+      </bpmndi:BPMNShape>
+
+      <!-- ── Sequence flow edges ─────────────────────────────────────────── -->
+      <bpmndi:BPMNEdge id="edge_start_create"       bpmnElement="flow_start_create">
+        <di:waypoint x="88"   y="290"/><di:waypoint x="140"  y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_create_debit"       bpmnElement="flow_create_debit">
+        <di:waypoint x="270"  y="290"/><di:waypoint x="320"  y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_debit_fraud"        bpmnElement="flow_debit_fraud">
+        <di:waypoint x="450"  y="290"/><di:waypoint x="500"  y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_fraud_gw"           bpmnElement="flow_fraud_gw">
+        <di:waypoint x="630"  y="290"/><di:waypoint x="685"  y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_gw_approved"        bpmnElement="flow_gw_approved">
+        <di:waypoint x="735"  y="290"/><di:waypoint x="875"  y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_gw_manual"          bpmnElement="flow_gw_manual">
+        <di:waypoint x="710"  y="315"/><di:waypoint x="710"  y="450"/><di:waypoint x="685" y="450"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_gw_denied"          bpmnElement="flow_gw_denied">
+        <di:waypoint x="710"  y="315"/><di:waypoint x="710"  y="600"/><di:waypoint x="685" y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_review_manual_gw"   bpmnElement="flow_review_manual_gw">
+        <di:waypoint x="835"  y="450"/><di:waypoint x="875"  y="450"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_cutoff_merge"       bpmnElement="flow_cutoff_merge">
+        <di:waypoint x="817"  y="472"/><di:waypoint x="817"  y="320"/><di:waypoint x="900" y="320"/><di:waypoint x="900" y="315"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_manual_approved"    bpmnElement="flow_manual_approved">
+        <di:waypoint x="900"  y="425"/><di:waypoint x="900"  y="315"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_manual_denied"      bpmnElement="flow_manual_denied">
+        <di:waypoint x="900"  y="475"/><di:waypoint x="900"  y="600"/><di:waypoint x="865" y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_merge_transfer"     bpmnElement="flow_merge_transfer">
+        <di:waypoint x="925"  y="290"/><di:waypoint x="975"  y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_transfer_update"    bpmnElement="flow_transfer_update">
+        <di:waypoint x="1125" y="290"/><di:waypoint x="1175" y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_update_notify"      bpmnElement="flow_update_notify">
+        <di:waypoint x="1305" y="290"/><di:waypoint x="1355" y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_notify_end"         bpmnElement="flow_notify_end">
+        <di:waypoint x="1485" y="290"/><di:waypoint x="1537" y="290"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_credit_cancel"      bpmnElement="flow_credit_cancel">
+        <di:waypoint x="815"  y="600"/><di:waypoint x="865"  y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_cancel_update"      bpmnElement="flow_cancel_update">
+        <di:waypoint x="995"  y="600"/><di:waypoint x="1045" y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_update_fail_notify" bpmnElement="flow_update_fail_notify">
+        <di:waypoint x="1175" y="600"/><di:waypoint x="1225" y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_failure_flag_gw"    bpmnElement="flow_failure_flag_gw">
+        <di:waypoint x="1355" y="600"/><di:waypoint x="1405" y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_flag_fraud"         bpmnElement="flow_flag_fraud">
+        <di:waypoint x="1455" y="600"/><di:waypoint x="1505" y="600"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_flag_no_fraud"      bpmnElement="flow_flag_no_fraud">
+        <di:waypoint x="1430" y="625"/><di:waypoint x="1430" y="650"/>
+        <di:waypoint x="1705" y="650"/><di:waypoint x="1705" y="618"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="edge_security_end"       bpmnElement="flow_security_end">
+        <di:waypoint x="1635" y="600"/><di:waypoint x="1687" y="600"/>
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+
+</definitions>
