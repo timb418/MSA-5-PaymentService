@@ -1,0 +1,49 @@
+20:58:17 [INFO ] Payment Service запускается. Zeebe: zeebe:26500
+20:58:17 [INFO ] Workers зарегистрированы: create-payment, debit-account, fraud-check, transfer-funds, update-payment-status, notify-client, cancel-payment, credit-account, notify-security
+20:58:17 [INFO ] Ожидание Zeebe по адресу zeebe:26500...
+20:58:17 [INFO ] Zeebe готов (attempt 1)
+20:58:17 [INFO ] [transfer-funds]  paymentId=pay-manual-b82c70  amount=50.00  to=ACC-2004  → TRANSFER_IN_PROGRESS  ★ PIVOT
+20:58:17 [INFO ] [update-status]   paymentId=pay-manual-b82c70  TRANSFER_IN_PROGRESS → COMPLETED
+20:58:17 [INFO ] [notify-client]   SUCCESS ✓  paymentId=pay-manual-b82c70  Клиент уведомлён об успешном платеже.
+20:58:27 [INFO ] =================================================================
+20:58:27 [INFO ]   ЗАПУСК ДЕМО-ЭКЗЕМПЛЯРОВ (4 сценария)
+20:58:27 [INFO ] =================================================================
+20:58:27 [INFO ] [create-payment]  paymentId=pay-d2efa415  amount=0.00  from=UNKNOWN  → INITIATED
+20:58:27 [INFO ]   STARTED key=2251799813687166 fraudScenario=APPROVED       paymentId=pay-approved-50ae75
+20:58:27 [INFO ] [create-payment]  paymentId=pay-approved-50ae75  amount=100.00  from=ACC-1001  → INITIATED
+20:58:27 [INFO ] [debit-account]   paymentId=pay-d2efa415  amount=0.00  from=UNKNOWN  → FUNDS_RESERVED
+20:58:27 [INFO ] [debit-account]   paymentId=pay-approved-50ae75  amount=100.00  from=ACC-1001  → FUNDS_RESERVED
+20:58:27 [INFO ] [fraud-check]     paymentId=pay-d2efa415  scenario=APPROVED       → fraudResult=APPROVED  isFraud=False
+20:58:27 [INFO ] [fraud-check]     paymentId=pay-approved-50ae75  scenario=APPROVED       → fraudResult=APPROVED  isFraud=False
+20:58:27 [INFO ] [transfer-funds]  paymentId=pay-approved-50ae75  amount=100.00  to=ACC-2001  → TRANSFER_IN_PROGRESS  ★ PIVOT
+20:58:27 [INFO ] [transfer-funds]  paymentId=pay-d2efa415  amount=0.00  to=UNKNOWN  → TRANSFER_IN_PROGRESS  ★ PIVOT
+20:58:27 [INFO ] [update-status]   paymentId=pay-approved-50ae75  TRANSFER_IN_PROGRESS → COMPLETED
+20:58:27 [INFO ] [update-status]   paymentId=pay-d2efa415  TRANSFER_IN_PROGRESS → COMPLETED
+20:58:27 [INFO ] [notify-client]   SUCCESS ✓  paymentId=pay-approved-50ae75  Клиент уведомлён об успешном платеже.
+20:58:27 [INFO ] [notify-client]   SUCCESS ✓  paymentId=pay-d2efa415  Клиент уведомлён об успешном платеже.
+20:58:28 [INFO ]   STARTED key=2251799813687259 fraudScenario=DENIED         paymentId=pay-denied-0431ed
+20:58:28 [INFO ] [create-payment]  paymentId=pay-denied-0431ed  amount=200.00  from=ACC-1002  → INITIATED
+20:58:28 [INFO ] [debit-account]   paymentId=pay-denied-0431ed  amount=200.00  from=ACC-1002  → FUNDS_RESERVED
+20:58:28 [INFO ] [fraud-check]     paymentId=pay-denied-0431ed  scenario=DENIED         → fraudResult=DENIED  isFraud=False
+20:58:28 [INFO ] [credit-account]  paymentId=pay-denied-0431ed  amount=200.00  to=ACC-1002  → REFUND_IN_PROGRESS  (компенсация)
+20:58:28 [INFO ] [cancel-payment]  paymentId=pay-denied-0431ed  Запись платежа отменена в БД.  (компенсация)
+20:58:28 [INFO ] [update-status]   paymentId=pay-denied-0431ed  REFUND_IN_PROGRESS → REFUNDED
+20:58:28 [INFO ] [notify-client]   FAILURE ✗  paymentId=pay-denied-0431ed  Клиент уведомлён об отклонении/возврате.
+20:58:29 [INFO ]   STARTED key=2251799813687318 fraudScenario=FRAUD          paymentId=pay-fraud-dcc4ae
+20:58:29 [INFO ] [create-payment]  paymentId=pay-fraud-dcc4ae  amount=999.99  from=ACC-1003  → INITIATED
+20:58:29 [INFO ] [debit-account]   paymentId=pay-fraud-dcc4ae  amount=999.99  from=ACC-1003  → FUNDS_RESERVED
+20:58:29 [INFO ] [fraud-check]     paymentId=pay-fraud-dcc4ae  scenario=FRAUD          → fraudResult=DENIED  isFraud=True
+20:58:29 [INFO ] [credit-account]  paymentId=pay-fraud-dcc4ae  amount=999.99  to=ACC-1003  → REFUND_IN_PROGRESS  (компенсация)
+20:58:29 [INFO ] [cancel-payment]  paymentId=pay-fraud-dcc4ae  Запись платежа отменена в БД.  (компенсация)
+20:58:29 [INFO ] [update-status]   paymentId=pay-fraud-dcc4ae  REFUND_IN_PROGRESS → REFUNDED
+20:58:29 [INFO ] [notify-client]   FAILURE ✗  paymentId=pay-fraud-dcc4ae  Клиент уведомлён об отклонении/возврате.
+20:58:29 [INFO ] [notify-security] FRAUD ALERT ⚠  paymentId=pay-fraud-dcc4ae  account=ACC-1003  fraudResult=DENIED  → СБ уведомлена!
+20:58:30 [INFO ]   STARTED key=2251799813687383 fraudScenario=MANUAL_REVIEW  paymentId=pay-manual-7be22b
+20:58:30 [INFO ] [create-payment]  paymentId=pay-manual-7be22b  amount=50.00  from=ACC-1004  → INITIATED
+20:58:30 [INFO ] [debit-account]   paymentId=pay-manual-7be22b  amount=50.00  from=ACC-1004  → FUNDS_RESERVED
+20:58:30 [INFO ] [fraud-check]     paymentId=pay-manual-7be22b  scenario=MANUAL_REVIEW  → fraudResult=MANUAL_REVIEW  isFraud=False
+20:58:31 [INFO ] =================================================================
+20:58:31 [INFO ]   Все экземпляры запущены.
+20:58:31 [INFO ]   Operate  → http://localhost:8081  (demo/demo)
+20:58:31 [INFO ]   Tasklist → http://localhost:8082  (demo/demo)
+20:58:31 [INFO ] =================================================================

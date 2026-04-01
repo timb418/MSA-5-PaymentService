@@ -1,0 +1,2 @@
+pyzeebe==4.4.0
+grpcio>=1.54.0
